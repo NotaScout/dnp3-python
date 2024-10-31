@@ -1,3 +1,4 @@
+import random
 import socket
 from time import sleep
 
@@ -31,7 +32,9 @@ def get_free_port(host="127.0.0.1", start_port=20000, end_port=30000):
     port = get_free_port()
     print(f"Port {port} is available.")
     """
-    for port in range(start_port, end_port + 1):
+    ports = list(range(start_port, end_port + 1))
+    random.shuffle(ports)
+    for port in ports:
         if not check_port_in_use(port, host):
             return port
         sleep(1)
