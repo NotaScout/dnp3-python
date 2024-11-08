@@ -1,9 +1,16 @@
+from __future__ import annotations
+
+import csv
 import datetime
+import io
 import logging
+import os
 import sys
 import time
+from dataclasses import asdict, dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
+# import pandas as pd
 from pydnp3 import asiodnp3, asiopal, opendnp3, openpal
 from pydnp3.opendnp3 import GroupVariation, GroupVariationID
 
@@ -117,6 +124,12 @@ class SOEHandler(opendnp3.ISOEHandler):
         # db
         self._db = self.init_db()
 
+        # temp: TODO get rid of them
+        self.visitor_dict: Dict[str, "VisitorClass"] = {}
+        self.value_visitor_dict: Dict[str, ICollectionIndexedVal] = {}
+        self.info_visitor_dict: Dict[str, ICollectionIndexedVal] = {"ds": "dfs"}
+        self.temp_values = None
+
     def config_logger(self, log_level=logging.INFO):
         self.logger.addHandler(stdout_stream)
         self.logger.setLevel(log_level)
@@ -152,10 +165,11 @@ class SOEHandler(opendnp3.ISOEHandler):
                 GroupVariation.Group30Var3,
                 GroupVariation.Group30Var4,
                 # GroupVariation.Group32Var0,
-                GroupVariation.Group32Var1,
+                # GroupVariation.Group32Var1,
                 GroupVariation.Group32Var2,
                 GroupVariation.Group32Var3,
                 GroupVariation.Group32Var4,
+                GroupVariation.Group32Var5,
             ]:
                 visitor = VisitorIndexedAnalogInt()
         elif visitor_class == VisitorIndexedAnalogOutputStatus:
@@ -173,6 +187,14 @@ class SOEHandler(opendnp3.ISOEHandler):
         # Note: mystery method, magic side effect to update visitor.index_and_value
         values.Foreach(visitor)
 
+        self.visitor_dict[str(visitor_class)] = visitor
+        self.value_visitor_dict[str(visitor_class)] = visitor
+        # info.Foreach(visitor)
+        self.info_visitor_dict[str(visitor_class)] = info
+        # self.info_ = info
+
+        # values.Foreach(visitor)
+
         # visitor.index_and_value: List[Tuple[int, DbPointVal]]
         for index, value in visitor.index_and_value:
             log_string = "SOEHandler.Process {0}\theaderIndex={1}\tdata_type={2}\tindex={3}\tvalue={4}"
@@ -187,8 +209,10 @@ class SOEHandler(opendnp3.ISOEHandler):
         visitor_ind_val: List[Tuple[int, DbPointVal]] = visitor.index_and_value
 
         # _log.info("======== SOEHandler.Process")
-        # _log.info(f"info_gv {info_gv}")
+        # _log.info(f"{info_gv=}")
         # _log.info(f"visitor_ind_val {visitor_ind_val}")
+        # _log.info(f"{values=}")
+        self.temp_values = values
         self._post_process(info_gv=info_gv, visitor_ind_val=visitor_ind_val)
 
     def _post_process(
@@ -259,7 +283,7 @@ class SOEHandler(opendnp3.ISOEHandler):
         "Binary", "BinaryOutputStatus", "Analog", "AnalogOutputStatus"
         """
         pass
-        # for Analog
+        # for Analog (TODO: why get GroupVariation.Group30Var6)
         _db = {
             "Analog": self._gv_index_value_nested_dict.get(GroupVariation.Group30Var6)
         }
@@ -457,10 +481,13 @@ class DBHandler:
         **kwargs,
     ):
         self.stack_config = stack_config
-        self._db: dict = self.config_db(stack_config)
+        self._db: dict = self.config_db(
+            stack_config
+        )  # TODO: ideally, this should be a dataclass
 
         self.logger = logging.getLogger(self.__class__.__name__)
         self.config_logger(log_level=dbhandler_log_level)
+        # self.dnp3_database: Dnp3Database = Dnp3Database()
 
     def config_logger(self, log_level=logging.INFO):
         self.logger.addHandler(stdout_stream)
@@ -487,9 +514,13 @@ class DBHandler:
     def db(self) -> dict:
         return self._db
 
-    def process(self, command, index):
-        pass
-        # _log.info(f"command {command}")
+    def process(self, command: OutstationCmdType, index: int):
+        """
+        Note: this method would be magically evoked when outstation apply_update,
+        or receive command from master.
+        command.__class__.__name__ is in ["Analog", "AnalogOutputStatus", "Binary", "BinaryOutputStatus"]
+        """
+        # _log.info(f"{command=}, {type(command)=}")
         # _log.info(f"index {index}")
         update_body: dict = {index: command.value}
         if self.db.get(command.__class__.__name__):
@@ -497,6 +528,12 @@ class DBHandler:
         else:
             self.db[command.__class__.__name__] = update_body
         # _log.info(f"========= self.db {self.db}")
+        command_to_dataclass_type = {
+            "Analog": "AnalogInput",
+            "AnalogOutputStatus": "AnalogOutput",
+            "Binary": "BinaryInput",
+            "BinaryOutputStatus": "BinaryOutput",
+        }
 
 
 class MyLogger(openpal.ILogHandler):
@@ -535,3 +572,80 @@ def to_flat_db(db: dict) -> dict:
             db_flat["Value"] += values
             db_flat["Type"] += types
     return db_flat
+
+
+import datetime
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass(frozen=True)
+class Dnp3DatabaseRecord:
+    """
+    Represents a record in a DNP3 database.
+
+    Attributes:
+        point_type (str): The type of point, e.g., AnalogInput, AnalogOutput.
+        index (int): The index of the point in the database.
+        value (str | float | bool | None): The value of the point.
+        updated_at (datetime.datetime): The timestamp when the point was last updated.
+        received_at (datetime.datetime): The timestamp when the point was last received.
+
+    Example:
+        >>> record = Dnp3DatabaseRecord(
+                point_type="AnalogInput",
+                index=1,
+                value=123.45,
+                updated_at=datetime.datetime.now(),
+                received_at=datetime.datetime.now()
+            )
+    """
+
+    point_type: str
+    index: int
+    value: str | float | bool | None
+    updated_at: str | datetime.datetime
+    # received_at: datetime.datetime
+
+
+class Dnp3Database:
+    """
+    DNP3 database representation
+    """
+
+    def __init__(self, db: dict, *args, **kwargs):
+        self._db = db
+        self = db
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self._db})"
+
+    @property
+    def Analog(self) -> dict[int, float | None]:
+        return self._db["Analog"]
+
+    @property
+    def AnalogOutputStatus(self) -> dict[int, float | None]:
+        return self._db["AnalogOutputStatus"]
+
+    @property
+    def Binary(self) -> dict[int, bool | None]:
+        return self._db["Binary"]
+
+    @property
+    def BinaryOutputStatus(self) -> dict[int, bool | None]:
+        return self._db["BinaryOutputStatus"]
+
+    def to_csv(self, file_path: str | None = None) -> None:
+        flat_dict = to_flat_db(self._db)
+        if file_path is None:
+            file_path = f"dnp3-database-{datetime.datetime.now().isoformat()}.csv"
+        # Open the CSV file for writing
+        with open(file_path, mode="w", newline="") as file:
+            # Create a CSV writer object
+            writer = csv.writer(file)
+            # Write the header (the keys of the dictionary)
+            writer.writerow(flat_dict.keys())
+            # Write the data rows
+            # Transpose the values from the dictionary to rows in CSV
+            writer.writerows(zip(*flat_dict.values()))
