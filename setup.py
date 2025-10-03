@@ -58,6 +58,10 @@ class CMakeExtension(Extension):
 
 class CMakeBuild(build_ext):
     def run(self):
+        # Run the update_cmake_version.py script before building
+        script_path = os.path.join(os.path.dirname(__file__), 'update_cmake_version.py')
+        if os.path.exists(script_path):
+            subprocess.check_call([sys.executable, script_path])
         try:
             out = subprocess.check_output(['cmake', '--version'])
         except OSError:
